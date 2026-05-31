@@ -1,0 +1,63 @@
+{
+  "browser": {
+    "cdpPort": 18800,
+    "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "userDataDir": "C:\\Users\\user\\.openclaw\\browser\\openclaw\\user-data"
+  },
+  "ais": {
+    "perplexity": {
+      "name": "Perplexity",
+      "url": "https://www.perplexity.ai/",
+      "enabled": false,
+      "reason": "需要外网环境，默认禁用",
+      "model": "GPT-5.4",
+      "inputType": "contenteditable",
+      "order": 1
+    },
+    "qwen": {
+      "name": "千问",
+      "url": "https://www.qianwen.com/chat?source=tongyigw",
+      "enabled": true,
+      "model": "Qwen3-Max-Thinking",
+      "thinkMode": true,
+      "inputType": "contenteditable",
+      "needsRefresh": true,
+      "order": 2
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "url": "https://chat.deepseek.com",
+      "enabled": true,
+      "thinkMode": true,
+      "searchMode": true,
+      "inputType": "textarea",
+      "order": 3
+    },
+    "kimi": {
+      "name": "Kimi",
+      "url": "https://www.kimi.com/",
+      "enabled": true,
+      "model": "K2.6 思考",
+      "inputType": "contenteditable",
+      "order": 4
+    },
+    "chatgpt": {
+      "name": "ChatGPT",
+      "url": "https://chatgpt.com/",
+      "enabled": false,
+      "reason": "需要外网环境，默认禁用",
+      "inputType": "textarea",
+      "order": 5
+    }
+  },
+  "extraction": {
+    "initialWaitMs": 3000,
+    "checkIntervalMs": 3000,
+    "maxWaitMs": 90000,
+    "stabilityChecks": 2
+  },
+  "summary": {
+    "provider": "qwen",
+    "waitMs": 20000
+  }
+}

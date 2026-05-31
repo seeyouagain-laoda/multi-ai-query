@@ -1,0 +1,78 @@
+{
+  "version": "2.1",
+  "browser": {
+    "cdpPort": 18800,
+    "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "userDataDir": "C:\\Users\\user\\.openclaw\\browser\\openclaw\\user-data"
+  },
+  "output": {
+    "format": "summary",
+    "saveHistory": false,
+    "resultDir": "./results"
+  },
+  "ais": {
+    "perplexity": {
+      "name": "Perplexity",
+      "url": "https://www.perplexity.ai/",
+      "enabled": true,
+      "model": "GPT-5.4",
+      "inputType": "contenteditable",
+      "order": 1,
+      "weight": 0.9,
+      "description": "需外网，引用来源清晰",
+      "responseClass": "[class*=\"prose\"]"
+    },
+    "qwen": {
+      "name": "千问",
+      "url": "https://www.qianwen.com/chat?source=tongyigw",
+      "enabled": true,
+      "model": "Qwen3-Max-Thinking",
+      "thinkMode": true,
+      "inputType": "contenteditable",
+      "needsRefresh": true,
+      "order": 2,
+      "weight": 1.0,
+      "description": "中文总结能力出色，负责最终汇总"
+    },
+    "deepseek": {
+      "name": "DeepSeek",
+      "url": "https://chat.deepseek.com",
+      "enabled": true,
+      "thinkMode": true,
+      "searchMode": true,
+      "inputType": "textarea",
+      "order": 3,
+      "weight": 1.0,
+      "description": "数学/逻辑推理强"
+    },
+    "kimi": {
+      "name": "Kimi",
+      "url": "https://www.kimi.com/",
+      "enabled": true,
+      "model": "K2.6 思考",
+      "inputType": "contenteditable",
+      "order": 4,
+      "weight": 0.9,
+      "description": "联网搜索/长文本处理"
+    },
+    "chatgpt": {
+      "name": "ChatGPT",
+      "url": "https://chatgpt.com/",
+      "enabled": true,
+      "inputType": "textarea",
+      "order": 5,
+      "weight": 0.9,
+      "description": "综合能力强，需外网"
+    }
+  },
+  "extraction": {
+    "initialWaitMs": 3000,
+    "checkIntervalMs": 3000,
+    "maxWaitMs": 90000,
+    "stabilityChecks": 2
+  },
+  "summary": {
+    "provider": "deepseek",
+    "waitMs": 20000
+  }
+}
