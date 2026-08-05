@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * Multi-AI Query v2.1 — 优化版
+ * Multi-AI Query v2.2 — 优化版
+ * v2.2: Chrome 151 兼容(--remote-allow-origins / /json/new 修复) + DeepSeek API 总结 + 发送重试 + CF 检测
  * 改进：config.json配置、错误隔离、可选AI、权重排序、多输出格式
  * 借鉴了 msij/Multi-AI-Aggregator-- 的配置化和输出格式设计
  */
 const WebSocket = require('ws');
 const http = require('http');
+const https = require('https');
 const {spawn} = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -35,7 +37,7 @@ for (let i = 2; i < process.argv.length; i++) {
 const ENABLED_AIS = Object.values(CONFIG.ais).filter(a => a.enabled).sort((a, b) => (a.order || 99) - (b.order || 99));
 if(ENABLED_AIS.length === 0) { console.error('❌ 没有启用的AI，请检查 config.json'); process.exit(1); }
 
-console.log(`\n🔍 多AI查询 V2.1: "${Q}"`);
+console.log(`\n🔍 多AI查询 V2.2: "${Q}"`);
 console.log(`   启用的AI: ${ENABLED_AIS.map(a => a.name).join(', ')}`);
 
 // 提示已自动禁用的AI
@@ -77,13 +79,36 @@ async function ev(ws, e, t = 20000) {
   return r?.result?.result?.value;
 }
 
+// ========== DeepSeek API 总结（v2.2，秒回且稳定） ==========
+// key 从环境变量 DEEPSEEK_API_KEY 读取（避免写进代码/仓库）；未配置时回退网页操作
+async function summaryWithAPI(question, answers) {
+  const apiKey = process.env.DEEPSEEK_API_KEY || '';
+  if (!apiKey) return null;
+  const prompt = '请综合总结以下来自不同AI对同一问题的回答，提取共同观点和核心内容，用中文输出一份详细完整的汇总报告：\n\n问题：' + question + '\n\n各AI回答：\n' + answers.map(x => '--- ' + x.name + ' ---\n' + (x.response || '').substring(0, 1200)).join('\n\n');
+  const body = JSON.stringify({ model: 'deepseek-chat', messages: [{ role: 'user', content: prompt }], stream: false, max_tokens: 2000 });
+  try {
+    const resp = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.deepseek.com', path: '/chat/completions', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
+      }, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => resolve({ status: r.statusCode, body: d })); });
+      req.on('error', reject); req.setTimeout(60000, () => { req.destroy(); reject(new Error('DeepSeek API 超时')); }); req.write(body); req.end();
+    });
+    if (resp.status === 200) {
+      const j = JSON.parse(resp.body);
+      return j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message.content.trim() : '';
+    }
+    return null;
+  } catch { return null; }
+}
+
 // ========== 浏览器管理 ==========
 async function ensureChrome() {
   try { await httpG('/json/version'); return }  // Chrome已在运行，不复重启
   catch {}
   process.stdout.write('  [Chrome] 启动中...');
   const urls = ENABLED_AIS.map(a => a.url);
-  spawn(CHROME, [`--remote-debugging-port=${CDP}`, `--user-data-dir=${UDATA}`, '--no-first-run', '--no-default-browser-check', ...urls], { detached: true, stdio: 'ignore' }).unref();
+  spawn(CHROME, [`--remote-debugging-port=${CDP}`, '--remote-allow-origins=*', `--user-data-dir=${UDATA}`, '--no-first-run', '--no-default-browser-check', ...urls], { detached: true, stdio: 'ignore' }).unref();
   for (let i = 0; i < 30; i++) { await slp(1000); try { await httpG('/json/version'); console.log(' ✅'); return } catch {} }
   throw new Error('Chrome启动超时');
 }
@@ -97,7 +122,24 @@ async function ensureTabs() {
     let tab = tabs.filter(t => t.type === 'page' && t.url?.includes(domain)).pop();
     if (!tab) {
       process.stdout.write('创建...');
-      try { await httpPut('/json/new?' + encodeURIComponent(ai.url)); await slp(5000); const ntabs = JSON.parse(await httpG('/json')); tab = ntabs.filter(t => t.type === 'page' && t.url?.includes(domain)).pop() } catch {}
+      try {
+        // Chrome 151: /json/new?url= 参数已失效（创建的是 about:blank），改为创建后 Page.navigate
+        await httpPut('/json/new');
+        await slp(1500);
+        let ntabs = JSON.parse(await httpG('/json'));
+        tab = ntabs.filter(t => t.type === 'page' && (t.url === 'about:blank' || !t.url)).pop() || ntabs.filter(t => t.type === 'page').pop();
+        if (tab) {
+          const ws = new WebSocket(tab.webSocketDebuggerUrl); ws.setMaxListeners(0);
+          await new Promise((r, rej) => { ws.once('open', r); ws.once('error', e => rej(e.message)); setTimeout(() => rej('超时'), 8000) });
+          await cdp(ws, 'Runtime.enable', {}, 5000).catch(() => {});
+          await cdp(ws, 'Page.navigate', { url: ai.url }, 15000).catch(() => {});
+          ws.close();
+          await slp(3000);
+          ntabs = JSON.parse(await httpG('/json'));
+          const navTab = ntabs.filter(t => t.type === 'page' && t.url?.includes(domain)).pop();
+          if (navTab) tab = navTab;
+        }
+      } catch {}
     }
     if (tab) {
       found.push({ ...ai, wsUrl: tab.webSocketDebuggerUrl });
@@ -148,8 +190,9 @@ async function sendOne(ai, q) {
     // 检查是否已配置
     const configured = ai.needsRefresh ? false : await ev(ws, "window.__model_configured===true", 3000);
 
-    // === AI特定设置 ===
+    // === AI特定设置（模型名从 config.json 的 model 字段读取，不再硬编码） ===
     if (ai.name === '千问' && !configured) {
+      const modelName = ai.model || 'Qwen3-Max-Thinking';
       // 刷新页面
       await cdp(ws, 'Page.navigate', { url: ai.url }, 15000);
       for (let i = 0; i < 30; i++) { if ((await ev(ws, 'document.readyState', 5000)) === 'complete') break; await slp(1000) }
@@ -160,7 +203,8 @@ async function sendOne(ai, q) {
       for (let ci = 0; ci < 3; ci++) { const cr = await ev(ws, "(function(){var btns=document.querySelectorAll('button');for(var i=0;i<btns.length;i++){var t=(btns[i].innerText||'').trim();if((t==='×'||t==='✕'||t==='X')&&btns[i].offsetParent){btns[i].click();return'X'}}var icons=document.querySelectorAll('[data-icon-type=qwpcicon-close]');for(var i=0;i<icons.length;i++){var ic=icons[i];if(ic.offsetParent){var btn=ic.closest('button');if(btn){btn.click();return'ICON'}ic.click();return'ICON_DIRECT'}}return'NONE'})()", 5000); if (cr === 'NONE') break; await slp(500) }
       // 选模型
       await ev(ws, "(function(){var s=document.querySelector('[data-icon-type=qwpcicon-down]');if(s){var b=s.closest('button')||s.parentElement;if(b&&b.click)b.click()}})()", 5000); await slp(1000);
-      await ev(ws, "(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if((e.innerText||'').trim()==='Qwen3-Max-Thinking'&&e.offsetParent){e.click();return}})()", 8000); await slp(300);
+      const qwenSel = await ev(ws, `(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if((e.innerText||'').trim()===${JSON.stringify(modelName)}&&e.offsetParent){e.click();return'selected'}}return'not_found'})()`, 8000); await slp(300);
+      if (qwenSel !== 'selected') res.warn = `模型 ${modelName} 未在下拉中找到（可能已更新），使用默认模型`;
       // 开思考
       for (let ti = 0; ti < 3; ti++) { const tk = await ev(ws, "(function(){var btns=document.querySelectorAll('button');for(var i=0;i<btns.length;i++){if((btns[i].innerText||'').trim()==='思考'&&btns[i].offsetParent){btns[i].click();return'clicked'}}return'NO'})()", 5000); if (tk === 'clicked') break; await slp(300) }
     }
@@ -174,14 +218,18 @@ async function sendOne(ai, q) {
     }
 
     if (ai.name === 'Kimi' && !configured) {
+      const modelName = ai.model || 'K2.6 思考';
       await ev(ws, "(function(){var e=document.querySelector('[class*=model-name]');if(e&&e.offsetParent){e.click();return'OK'}return'NO'})()", 5000); await slp(2000);
-      await ev(ws, "(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.innerText||'').trim()==='K2.6 思考'&&e.offsetParent){e.click();return'selected'}}return'not_found'})()", 8000); await slp(500);
+      const kimiSel = await ev(ws, `(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.innerText||'').trim()===${JSON.stringify(modelName)}&&e.offsetParent){e.click();return'selected'}}return'not_found'})()`, 8000); await slp(500);
+      if (kimiSel !== 'selected') res.warn = `模型 ${modelName} 未找到（可能已更新），使用默认模型`;
       await ev(ws, "window.__model_configured=true", 3000);
     }
 
     if (ai.name === 'Perplexity' && !configured) {
+      const modelName = ai.model || 'GPT-5.4';
       await ev(ws, "(function(){var sel=document.querySelector('[class*=select]');if(sel&&sel.offsetParent&&sel.click){sel.click();return'OK'}return'NO'})()", 5000); await slp(2000);
-      await ev(ws, "(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.innerText||'').trim().includes('GPT-5.4')&&e.offsetParent){e.click();return'selected'}}return'not_found'})()", 8000); await slp(500);
+      const pplxSel = await ev(ws, `(function(){var all=document.querySelectorAll('*');for(var i=0;i<all.length;i++){var e=all[i];if(e.children.length===0&&(e.innerText||'').trim().includes(${JSON.stringify(modelName)})&&e.offsetParent){e.click();return'selected'}}return'not_found'})()`, 8000); await slp(500);
+      if (pplxSel !== 'selected') res.warn = `模型 ${modelName} 未找到（可能已更新），使用默认模型`;
       await ev(ws, "window.__model_configured=true", 3000);
     }
 
@@ -351,6 +399,16 @@ async function extractOne(ai) {
     }
     if (!resp || resp.length <= 30 || stableCount < 1) { resp = await tryExtract(); await slp(2000); const r2 = await tryExtract(); if (r2 && r2.length > resp.length) resp = r2 }
 
+    // 登录页内容过滤：提取到登录/注册引导 → 标记无效并明确提示
+    const LOGIN_RE = /log in|sign in|sign up|立即注册|继续使用 Google|继续使用 Apple|解锁.*全部功能|登录.{0,6}解锁/i;
+    if (resp && resp.length < 300 && LOGIN_RE.test(resp)) {
+      res.status = 'empty';
+      res.response = '⚠️ 该网站可能未登录（提取到登录引导内容），请在浏览器中登录后重试';
+      res.duration = Date.now() - t0;
+      if (ws) try { ws.close() } catch {}
+      return res;
+    }
+
     res.status = (resp && resp.length > 30) ? 'success' : 'empty';
     res.response = (resp || '未能获取回复').substring(0, 5000);
     res.duration = Date.now() - t0;
@@ -377,7 +435,16 @@ async function main() {
       ws = new WebSocket(t.wsUrl); ws.setMaxListeners(0);
       await new Promise((r, rej) => { ws.once('open', r); ws.once('error', e => rej(e.message)); setTimeout(() => rej('超时'), 8000) });
       await cdp(ws, 'Runtime.enable', {}, 5000).catch(() => {});
+      const cfBlocked = await ev(ws, '/verify you are human|checking your browser|just a moment|cf-browser-verification/i.test((document.body.innerText||""))', 5000);
+      if (cfBlocked) { console.log(`  [${t.name}] ⚠️ Cloudflare 验证页（请手动过验证后重试）`); continue; }
       const hasBody = (await ev(ws, '(document.body.innerText||"").length', 5000) || 0) > 50;
+      // 未登录检测：页面含登录/注册关键词 + 无聊天输入框 → 判定未登录
+      const loginHit = await ev(ws, '/log in|sign in|sign up|log in to continue|立即登录|立即注册|继续使用 Google|继续使用 Apple|解锁.*全部功能/i.test((document.body.innerText||""))', 5000);
+      const hasChatInput = await ev(ws, '!!(document.querySelector("textarea")||document.querySelector("[contenteditable=true]"))', 5000);
+      if (loginHit && !hasChatInput) {
+        console.log(`  [${t.name}] ⚠️ 未登录（检测到登录引导页，请在浏览器中登录后重试）`);
+        continue;
+      }
       console.log(`  [${t.name}] ${hasBody ? '✅' : '⚠️ 内容少'}`);
       if (hasBody) okTabs.push(t);
     } catch { console.log(`  [${t.name}] ❌ 连接失败`) }
@@ -387,15 +454,22 @@ async function main() {
   if (okTabs.length === 0) { console.log('\n  ❌ 没有可用的AI网站'); return }
   console.log(`\n  ✅ ${okTabs.length} 个网站已登录\n`);
 
-  // 阶段1: 串行发送
+  // 阶段1: 串行发送（失败自动重试 1 次）
   console.log('[3/3] 发送问题...');
   const sendData = [];
   for (let i = 0; i < okTabs.length; i++) {
     process.stdout.write(`  [${i + 1}/${okTabs.length}] ${okTabs[i].name} 发送...`);
-    const r = await sendOne(okTabs[i], Q);
+    let r = await sendOne(okTabs[i], Q);
+    if (!r.sent && r.error) {
+      process.stdout.write(' 重试...');
+      await slp(2500);
+      const r2 = await sendOne(okTabs[i], Q);
+      if (r2.sent) { r = r2; console.log(' ✅(重试成功)'); } else { r.error = r2.error || r.error; console.log(' ⚠️ ' + r.error); }
+    } else {
+      console.log(r.sent ? ' ✅' + (r.warn ? ' (' + r.warn + ')' : '') : ' ⚠️ ' + r.error);
+    }
     sendData.push(r);
     await slp(2000);
-    console.log(r.sent ? ' ✅' : ' ⚠️ ' + r.error);
   }
 
   // 阶段2: 并行提取
@@ -424,26 +498,36 @@ async function main() {
   console.log(`  ✔ ${successes.length} 成功  ✘ ${failures.length} 失败`);
   console.log('='.repeat(58) + '\n');
 
-  // 总结（用DeepSeek，提取最稳定）
+  // 总结：优先 DeepSeek API（秒回稳定），无 key 或失败时回退网页操作
   if (successes.length > 0) {
-    const sumTab = okTabs.find(t => t.name === 'DeepSeek') || okTabs[0];
     process.stdout.write('  🤖 正在生成综合总结...');
     const summaryPrompt = '请综合总结以下来自不同AI对同一问题的回答，提取共同观点和核心内容，用中文输出一份详细完整的汇总报告：\n\n问题：' + Q + '\n\n各AI回答：\n' + successes.map(x => '--- ' + x.name + ' ---\n' + (x.response || '').substring(0, 1200)).join('\n\n');
-    try {
-      const w3 = new WebSocket(sumTab.wsUrl); w3.setMaxListeners(0);
-      await new Promise((r2, rej2) => { w3.once('open', r2); w3.once('error', e => rej2(e.message)); setTimeout(() => rej2('超时'), 8000) });
-      await cdp(w3, 'Page.bringToFront', {}, 5000).catch(() => {});
-      w3.close();
-    } catch {}
-    const sumRes = await sendOne(sumTab, summaryPrompt);
-    if (sumRes.sent) {
-      await slp(CONFIG.summary.waitMs);
-      const sumExt = await extractOne({ ...sumTab, name: 'DeepSeek', beforeBody: sumRes.beforeBody });
-      if (sumExt.status === 'success' && sumExt.response.length > 50) {
-        console.log(' ✅\n');
-        console.log('  📋 综合总结');
-        console.log('  ' + '-'.repeat(58));
-        console.log((sumExt.response || '').split('\n').map(l => '    ' + l).join('\n'));
+    let summaryText = await summaryWithAPI(Q, successes);
+    if (summaryText && summaryText.length > 50) {
+      console.log(' ✅ (DeepSeek API)\n');
+      console.log('  📋 综合总结');
+      console.log('  ' + '-'.repeat(58));
+      console.log(summaryText.split('\n').map(l => '    ' + l).join('\n'));
+    } else {
+      // 回退：网页操作 DeepSeek
+      console.log(' (API 不可用，回退网页)...');
+      const sumTab = okTabs.find(t => t.name === 'DeepSeek') || okTabs[0];
+      try {
+        const w3 = new WebSocket(sumTab.wsUrl); w3.setMaxListeners(0);
+        await new Promise((r2, rej2) => { w3.once('open', r2); w3.once('error', e => rej2(e.message)); setTimeout(() => rej2('超时'), 8000) });
+        await cdp(w3, 'Page.bringToFront', {}, 5000).catch(() => {});
+        w3.close();
+      } catch {}
+      const sumRes = await sendOne(sumTab, summaryPrompt);
+      if (sumRes.sent) {
+        await slp(CONFIG.summary.waitMs);
+        const sumExt = await extractOne({ ...sumTab, name: 'DeepSeek', beforeBody: sumRes.beforeBody });
+        if (sumExt.status === 'success' && sumExt.response.length > 50) {
+          console.log(' ✅\n');
+          console.log('  📋 综合总结');
+          console.log('  ' + '-'.repeat(58));
+          console.log((sumExt.response || '').split('\n').map(l => '    ' + l).join('\n'));
+        }
       }
     }
   }

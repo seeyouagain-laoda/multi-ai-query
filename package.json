@@ -1,13 +1,13 @@
 {
   "name": "multi-ai-query-v2",
-  "version": "2.0.0",
-  "description": "同时查询多个AI并自动汇总 — 模块化重构版",
+  "version": "2.2.0",
+  "description": "Multi-AI Query v2.2: Chrome 151 compat + DeepSeek API summary + stability",
   "main": "index.js",
   "scripts": {
     "query": "node index.js",
     "test": "node index.js \"测试\""
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.21.2"
   }
 }

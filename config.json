@@ -1,5 +1,5 @@
 {
-  "version": "2.1",
+  "version": "2.2",
   "browser": {
     "cdpPort": 18800,
     "executablePath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
@@ -31,7 +31,7 @@
       "inputType": "contenteditable",
       "needsRefresh": true,
       "order": 2,
-      "weight": 1.0,
+      "weight": 1,
       "description": "中文总结能力出色，负责最终汇总"
     },
     "deepseek": {
@@ -42,7 +42,7 @@
       "searchMode": true,
       "inputType": "textarea",
       "order": 3,
-      "weight": 1.0,
+      "weight": 1,
       "description": "数学/逻辑推理强"
     },
     "kimi": {
